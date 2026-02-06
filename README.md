@@ -1,33 +1,45 @@
-# Zero-Tear Persistence for ESP32 & LVGL
+# Zero-Tear Persistence Minimal Example
 
-This repository contains a minimal, robust solution for saving data to NVS on the ESP32-S3 without causing screen tearing or flickering on RGB LCDs.
+This project demonstrates a robust "Zero-Tear" persistence architecture for ESP32 systems using RGB LCDs. It solves the common issue of display flickering and horizontal tearing caused by the high current spikes and bus contention inherent in NVS (Non-Volatile Storage) flash writes.
 
-## The Problem
-Writing to Flash memory on the ESP32-S3 often causes high-current spikes and bus contention that interrupts DMA transfers to the display, resulting in visible "tearing" or horizontal glitches.
+## System Architecture
 
-## The Solution: Bus Arbitration Architecture
-1. **Asynchronous Task**: Data is buffered in RAM and saved in the background on Core 0.
-2. **Debouncing**: Changes are only committed after 3 seconds of idle time.
-3. **Bus Locking**: Before writing to flash, we call `lvgl_port_stop_render()` to silence the SPI/DMA bus.
-4. **Explicit Commit**: We use `preferences.end()` to ensure data is physically flushed to silicon.
+The following diagram illustrates the arbitration logic and data flow that ensures a flicker-free user experience:
 
-## Files
-- `ProfileManager.cpp/h`: The core logic for safe persistence.
-- `AppTypes.h`: Data structures for your application.
-- `minimal_persistence_example.ino`: Demo showing how to trigger saves.
-- `esp_panel_board_custom_conf.h`: RGB Display and Touch configuration for Waveshare 4.3".
-- `lv_conf.h`: Optimized LVGL memory and feature settings.
+```mermaid
+graph TD
+    subgraph "High Priority (Core 1)"
+        UI[LVGL UI Screens] -->|Instant Update| RAM[RAM Data Structures]
+        RENDER[LVGL Rendering Engine] -->|DMA Transfer| DISP[RGB LCD Display]
+    end
 
-## Hardware Configuration
-This example is pre-configured for the **Waveshare ESP32-S3-Touch-LCD-4.3**. It uses:
-- **RGB565** 16-bit color depth.
-- **GT911** I2C Touch controller.
-- **CH422G** IO Expander for backlight and reset control.
-- **Bounce Buffers**: Enabled to prevent screen drifting an tearing during high-speed DMA.
+    subgraph "Persistence Context (Core 0)"
+        RAM -->|Periodic Sync| PM[ProfileManager Logic]
+        PM -->|Debounce / Queue| BG[Background Save Task]
+        BG -->|3. Preferences.commit| NVS[(ESP32 NVS Partition)]
+    end
 
-## How to use
-1. Copy `ProfileManager` and `AppTypes` into your project.
-2. In your display port, implement `lvgl_port_stop_render` and `lvgl_port_resume_render`.
-3. Call `Profiles.saveProfiles(data, count)` in your UI.
-4. Data will persist in the background without a single flicker!
-"# -Zero-Tear-Persistence-for-ESP32-LVGL" 
+    subgraph "Bus Arbitration (Zero-Tear Logic)"
+        BG -.->|1. Pulse| LOCK[Bus Multi-Pass Lock]
+        LOCK -.->|2. Stop DMA| RENDER
+        NVS -.->|4. Release| LOCK
+        LOCK -.->|5. Resume| RENDER
+    end
+
+    style LOCK fill:#f96,stroke:#333,stroke-width:2px
+    style UI fill:#bbf,stroke:#333,stroke-width:2px
+    style NVS fill:#dfd,stroke:#333,stroke-width:2px
+```
+
+## Key Principles
+
+1. **Decoupled Writes**: User interaction updates RAM instantly. Persistent storage is handled in the background, preventing the UI from blocking.
+2. **Bus Locking**: Before any flash write occurs, the system signals the display driver to pause DMA transfers. This "Blackout/Pause" state prevents the display controller from reading corrupted data during the voltage/current transient of a flash write.
+3. **Core Isolation**: The Save Task runs on Core 0 (Protocol Core), keeping Core 1 (APP Core) dedicated to high-speed UI rendering.
+4. **Debounced Syncing**: To minimize flash wear and power spikes, saves are debounced (e.g., 3-5 seconds of idle) or triggered only on critical transitions.
+
+## Project Structure
+- `ProfileManager.cpp/h`: Manages the background task and bus locking logic.
+- `AppTypes.h`: Defines the structures for data being persisted.
+- `minimal_persistence_example.ino`: Orchestrates the initialization and provides a test bench.
+- `esp_panel_board_custom_conf.h`: Hardware-specific configuration for Waveshare 4.3" RGB LCD.
